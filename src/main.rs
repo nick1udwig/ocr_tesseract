@@ -6,15 +6,24 @@ use rayon::prelude::*;
 fn convert_pdf_to_png(pdf_path: &str, output_path: &str) -> std::io::Result<()> {
     // Construct the command
     // For ImageMagick version 7 and newer, use `magick convert` instead of `convert`
-    let output = format!("{}/{}", output_path, "page-%04d.png");
-    let status = std::process::Command::new("convert")
-        .arg("-density")
-        .arg("150")
+    //let output = format!("{}/{}", output_path, "page-%04d.png");
+    let output = format!("{}/{}", output_path, "page");
+
+    // fast, but depending on pdf, multiple images per page
+    let status = std::process::Command::new("pdfimages")
         .arg(pdf_path)
-        .arg("-quality")
-        .arg("90")
         .arg(output)
         .status()?;
+
+    // takes a long time but gives one png per page
+    //let status = std::process::Command::new("convert")
+    //    .arg("-density")
+    //    .arg("150")
+    //    .arg(pdf_path)
+    //    .arg("-quality")
+    //    .arg("90")
+    //    .arg(output)
+    //    .status()?;
 
     if status.success() {
         println!("PDF conversion successful.");
@@ -31,7 +40,8 @@ fn list_png_files(dir: &Path) -> Vec<PathBuf> {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("png") {
+            //if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("png") {
+            if path.is_file() {
                 png_files.push(path);
             }
         }
@@ -41,9 +51,10 @@ fn list_png_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn main() {
-    let pdf_name = "/home/nick/Downloads/octaviusofminuci00minuiala.pdf";
+    let pdf_name = "octaviusofminuci00minuiala.pdf";
     let processing_dir_name = "/tmp/octavius";
     let processing_dir = Path::new(processing_dir_name);
+    let txt_name = "octavius.txt";
     std::fs::create_dir_all(processing_dir_name).unwrap();
 
     let start = std::time::Instant::now();
@@ -72,5 +83,5 @@ fn main() {
         .collect::<String>();
     println!("Done OCRing pages in {:?}", start.elapsed());
 
-    println!("{}", text);
+    std::fs::write(txt_name, text).unwrap();
 }
