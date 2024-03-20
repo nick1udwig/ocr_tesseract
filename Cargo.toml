@@ -1,0 +1,8 @@
+[package]
+name = "ocr_tesseract"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rayon = "1.9"
+tesseract = "0.13.0"
