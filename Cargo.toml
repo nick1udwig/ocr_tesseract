@@ -3,9 +3,14 @@ name = "ocr_tesseract"
 version = "0.1.0"
 edition = "2021"
 
+[build-dependencies]
+nlprule-build = "0.6.4"
+
 [dependencies]
+dbscan = "0.3.1"
 image = "0.25"
 imageproc = "0.24"
+nlprule = "0.6.4"
 rayon = "1.9"
 regex = "1"
 tesseract = "0.13.0"

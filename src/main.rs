@@ -1,8 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use nlprule::{Rules, Tokenizer, tokenizer_filename, rules_filename, types::Suggestion, rules::apply_suggestions};
 use rayon::prelude::*;
 use regex::Regex;
+
 
 fn convert_pdf_to_png(pdf_path: &str, output_path: &str) -> std::io::Result<()> {
     // Construct the command
@@ -58,10 +60,12 @@ fn clean_ocr_text(text: &str) -> String {
     let cleaning_functions: Vec<&dyn Fn(&str) -> String> = vec![
         &remove_scan_artifacts,
         &remove_page_numbers,
+        &combine_split_words,
+        //&remove_headers,
         &remove_headers_and_footers,
         &normalize_newlines_preserve_paragraphs,
         &trim_lines,
-        &remove_non_alphabetic,
+        //&remove_non_alphabetic,
         &remove_repetitive_patterns_preserving_paragraphs,
     ];
 
@@ -72,6 +76,35 @@ fn clean_ocr_text(text: &str) -> String {
 
     cleaned_text
 }
+
+// fn remove_headers(text: &str) -> String {
+//     let header_patterns = vec![
+//         r"(?i)\b(?:[ivxlcdm]+|\d+)\s+", // Matches Roman numerals or digits at the beginning of a line
+//         r"\s+(?:[ivxlcdm]+|\d+)\b", // Matches Roman numerals or digits at the end of a line
+//     ];
+//
+//     let mut cleaned_text = text.to_string();
+//
+//     for pattern in header_patterns {
+//         let re = Regex::new(&format!(r"{}{}", r"(?m)^.*?", pattern)).unwrap(); // Use multiline mode, match start of line, and lazy quantifier
+//         cleaned_text = re.replace_all(&cleaned_text, "").to_string();
+//     }
+//
+//     // Further cleanup to remove any orphaned page numbers and excessive newlines created by header removal
+//     let re_orphaned_page_numbers = Regex::new(r"(?m)^\s*(?:[ivxlcdm]+|\d+)\s*$").unwrap();
+//     cleaned_text = re_orphaned_page_numbers.replace_all(&cleaned_text, "").to_string();
+//
+//     let re_excessive_newlines = Regex::new(r"\n{2,}").unwrap(); // Collapse multiple newlines to just double newlines, preserving paragraphs
+//     cleaned_text = re_excessive_newlines.replace_all(&cleaned_text, "\n\n").to_string();
+//
+//     cleaned_text
+// }
+
+fn combine_split_words(text: &str) -> String {
+    let re = Regex::new(r"-\n").unwrap();
+    re.replace_all(text, "").to_string()
+}
+
 
 fn remove_scan_artifacts(text: &str) -> String {
     // Example: Removing random characters or patterns identified as scan artifacts
@@ -87,7 +120,8 @@ fn remove_page_numbers(text: &str) -> String {
 
 fn remove_headers_and_footers(text: &str) -> String {
     // Example: Removing common headers/footers (this is highly dependent on the document's structure)
-    let re = Regex::new(r"(CHAPTER \w+)|(Page \d+)").unwrap();
+    //let re = Regex::new(r"(CHAPTER \w+)|(Page \d+)").unwrap();
+    let re = Regex::new(r"(Page \d+)").unwrap();
     re.replace_all(text, "").to_string()
 }
 
@@ -149,7 +183,7 @@ fn count_edges(image: &image::GrayImage) -> u32 {
     image.pixels().filter(|&p| p[0] > 0).count() as u32
 }
 
-fn has_text(image_path: &str) -> bool {
+fn has_text(image_path: &str) -> Option<image::GrayImage> {
     // Load the image
     let image = image::open(image_path).unwrap().to_luma8();
 
@@ -164,10 +198,67 @@ fn has_text(image_path: &str) -> bool {
 
     println!("{}: {}", image_path, edge_count);
     if edge_count > threshold {
-        true
+        Some(edges)
     } else {
-        false
+        None
     }
+}
+
+fn crop_image(path_in: &str, path_out: &str, edges: &image::GrayImage) {
+    // Load the image
+    let image = image::open(path_in).unwrap().to_luma8();
+
+    // Convert edge points to coordinates
+    let edge_points: Vec<_> = edges.enumerate_pixels()
+        .filter(|&(_, _, p)| p[0] > 0)
+        .map(|(x, y, _)| vec![x as f64, y as f64])
+        .collect();
+
+    // Cluster the edge points using DBSCAN
+    let classifications = dbscan::Model::new(10.0, 5).run(&edge_points);
+
+    // Iterate through the clusters and find bounding boxes
+    let mut clusters: Vec<Vec<_>> = Vec::new();
+    for (i, label) in classifications.iter().enumerate() {
+        match label {
+            dbscan::Classification::Noise => continue,
+            dbscan::Classification::Core(cluster_idx) | dbscan::Classification::Edge(cluster_idx) => {
+                if cluster_idx < &clusters.len() {
+                    clusters[*cluster_idx].push(edge_points[i].clone());
+                } else {
+                    clusters.push(vec![edge_points[i].clone()]);
+                }
+            },
+        }
+    }
+
+    for cluster in clusters.iter() {
+        let (min_x, max_x) = find_min_max(cluster.iter().map(|p| p[0]).collect()).unwrap();
+        let (min_y, max_y) = find_min_max(cluster.iter().map(|p| p[1]).collect()).unwrap();
+
+        println!("Cluster; Bounding box: x: {} - {}, y: {} - {}", min_x, max_x, min_y, max_y);
+
+        // Crop the image to the bounding box (adjust as necessary for your use case)
+        //let cropped = imageproc::crop::crop_imm(&image, min_x as u32, min_y as u32, (max_x - min_x) as u32, (max_y - min_y) as u32);
+        let cropped = image::imageops::crop_imm(&image, min_x as u32, min_y as u32, (max_x - min_x) as u32, (max_y - min_y) as u32).to_image();
+        cropped.save(path_out).unwrap();
+    }
+}
+
+fn find_min_max(values: Vec<f64>) -> Option<(f64, f64)> {
+    values.iter().fold(None, |minmax, &val| match minmax {
+        None => Some((val, val)),
+        Some(current_minmax) => Some((f64::min(val, current_minmax.0), (f64::max(val, current_minmax.1)))),
+    })
+}
+
+fn ocr(filename: &str, language: &str) -> Result<String, tesseract::TesseractError> {
+    let mut t = tesseract::Tesseract::new(None, Some(language))?;
+    t.set_page_seg_mode(tesseract::PageSegMode::PsmAuto);
+    Ok(t
+        .set_image(filename)?
+        .recognize()?
+        .get_text()?)
 }
 
 fn main() {
@@ -196,15 +287,23 @@ fn main() {
         .enumerate()
         .filter_map(|(i, file)| {
             let path = file.to_string_lossy().to_string();
-            if !has_text(&path) {
-                return None;
-            };
-            Some((
-                i,
-                tesseract::ocr(&path, "eng")
-                    .unwrap_or_default()
-                ,
-            ))
+            match has_text(&path) {
+                None => None,
+                Some(_edges) => {
+                    Some((
+                        i,
+                        //tesseract::ocr(&path, "eng")
+                        ocr(&path, "eng").unwrap_or_default(),
+                    ))
+                    //let crop_path = format!("crop-{}", path);
+                    //crop_image(&path, &crop_path, &edges);
+                    //Some((
+                    //    i,
+                    //    //tesseract::ocr(&path, "eng")
+                    //    ocr(&crop_path, "eng").unwrap_or_default(),
+                    //))
+                },
+            }
         })
         .collect::<Vec<(usize, String)>>();
     texts.sort_by(|a, b| a.0.cmp(&b.0));
@@ -224,12 +323,38 @@ fn main() {
     //        acc
     //    });
     println!("Done OCRing pages in {:?}.", start.elapsed());
+    let mut out = txt_name.to_string();
+    out.push_str("ocr");
+    std::fs::write(out, &text).unwrap();
 
     //let text = std::fs::read_to_string(txt_name).unwrap();
     println!("Cleaning text...");
     let text = clean_ocr_text(&text);
     println!("Done cleaning text.");
+    let mut out = txt_name.to_string();
+    out.push_str("ocr-clean");
+    std::fs::write(out, &text).unwrap();
 
-    std::fs::write(txt_name, text).unwrap();
-    //std::fs::write("octavius-cleaned.txt", text).unwrap();
+    let start = std::time::Instant::now();
+    println!("Applying NLP rules...");
+    let mut tokenizer_bytes: &'static [u8] = include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/",
+        tokenizer_filename!("en")
+    ));
+    let mut rules_bytes: &'static [u8] = include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/",
+        rules_filename!("en")
+    ));
+
+    let tokenizer = Tokenizer::from_reader(&mut tokenizer_bytes).expect("tokenizer binary is valid");
+    let rules = Rules::from_reader(&mut rules_bytes).expect("rules binary is valid");
+
+    let suggestions = rules.suggest(&text, &tokenizer);
+
+    let text = apply_suggestions(&text, &suggestions);
+    println!("Done applying NLP rules in {:?}.", start.elapsed());
+
+    std::fs::write(txt_name, &text).unwrap();
 }
